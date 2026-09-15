@@ -55,23 +55,28 @@ def get_grok_client(api_key: str):
 
 def get_active_grok_model(client: OpenAI) -> str:
     """
-    Dynamically retrieve active Grok model from the xAI API list endpoint
-    to prevent 'Model not found' 400 errors.
+    Dynamically fetches available models from your xAI API account.
+    Falls back to current standard model names.
     """
-    candidate_models = ["grok-4.6", "grok-2-latest", "grok-2", "grok-beta"]
+    preferred_models = ["grok-4.6", "grok-4-latest", "grok-4", "grok-3", "grok-2-1212"]
+    
     try:
-        available_models = [m.id for m in client.models.list()]
-        for candidate in candidate_models:
-            if candidate in available_models:
-                return candidate
-        # If candidates are not explicitly listed, return the first available model ID
-        if available_models:
-            return available_models[0]
+        models_response = client.models.list()
+        available_model_ids = [m.id for m in models_response.data] if hasattr(models_response, 'data') else [m.id for m in models_response]
+        
+        # 1. Match preferred models if present
+        for model in preferred_models:
+            if model in available_model_ids:
+                return model
+                
+        # 2. Return first available text model if preferred list doesn't match
+        if available_model_ids:
+            return available_model_ids[0]
     except Exception:
         pass
-    
-    # Safe fallback if listing models endpoint is unavailable
-    return "grok-2-latest"
+
+    # Safe fallback if model list call fails
+    return "grok-4.6"
 
 # ==============================================================================
 # 3. EXTRACTION FUNCTIONS
@@ -108,7 +113,6 @@ def extract_uploaded_file(file) -> List[Dict[str, Any]]:
 def extract_pdf_from_url(url: str) -> List[Dict[str, Any]]:
     """Download and extract text page-by-page from a web PDF or Google Drive URL."""
     try:
-        # Convert standard Google Drive view/share links to direct download links
         if "drive.google.com" in url:
             file_id_match = re.search(r'/d/([a-zA-Z0-9_-]+)', url) or re.search(r'id=([a-zA-Z0-9_-]+)', url)
             if file_id_match:
@@ -351,7 +355,7 @@ def generate_grounded_answer(query: str, retrieved_chunks: List[Dict], api_key: 
     try:
         client = get_grok_client(api_key)
         
-        # Dynamically resolve model to avoid 400 Bad Request model error
+        # Dynamically retrieve active model for your xAI account
         selected_model = get_active_grok_model(client)
 
         response = client.chat.completions.create(
