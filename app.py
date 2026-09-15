@@ -31,6 +31,9 @@ DEFAULT_SEM_WEIGHT = 0.70
 DEFAULT_KEY_WEIGHT = 0.30
 DEFAULT_THRESHOLD = 0.10
 
+# Maximum characters allowed in prompt context to prevent Groq API max context errors
+MAX_CONTEXT_CHARS = 6000
+
 st.set_page_config(
     page_title="Advanced RAG AI Document Assistant",
     page_icon="📚",
@@ -58,7 +61,6 @@ def get_active_groq_model(client: OpenAI) -> str:
     Dynamically fetches available models from your Groq API account
     to avoid hardcoded model name deprecation or access errors.
     """
-    # Preferred free & reliable Groq models ranked by preference
     preferred_models = [
         "llama-3.1-8b-instant",
         "llama3-70b-8192",
@@ -71,18 +73,15 @@ def get_active_groq_model(client: OpenAI) -> str:
         models_response = client.models.list()
         available_model_ids = [m.id for m in models_response.data] if hasattr(models_response, 'data') else [m.id for m in models_response]
         
-        # 1. Match preferred models if present in user's available models
         for model in preferred_models:
             if model in available_model_ids:
                 return model
                 
-        # 2. Return first available model ID if none from preferred list matched
         if available_model_ids:
             return available_model_ids[0]
     except Exception:
         pass
 
-    # Safe fallback if dynamic listing fails
     return "llama-3.1-8b-instant"
 
 # ==============================================================================
@@ -338,31 +337,40 @@ def automatic_hybrid_search(query: str, index: faiss.Index, metadata: List[Dict]
 # ==============================================================================
 # 8. GROUNDED GENERATION VIA GROQ API
 # ==============================================================================
-def generate_grounded_answer(query: str, retrieved_chunks: List[Dict], api_key: str) -> str:
-    """Generates grounded answers strictly derived from retrieved context using Groq API."""
+def generate_grounded_answer(query: str, retrieved_chunks: List[Dict], api_key: str) -> Tuple[str, List[Dict]]:
+    """
+    Generates grounded answers strictly derived from retrieved context using Groq API.
+    Truncates prompt to safely avoid error 400 and clears sources if no info is found.
+    """
     if not retrieved_chunks:
-        return "No information found in the provided documents."
+        return "No information found in the provided documents.", []
 
+    # Build context string safely without exceeding MAX_CONTEXT_CHARS
     context_str = ""
+    used_chunks = []
+
     for idx, c in enumerate(retrieved_chunks, 1):
-        context_str += f"\n--- CONTEXT CHUNK {idx} ---\n"
-        context_str += f"Document: {c['document_name']} (Page {c['page_number']})\n"
-        context_str += f"Content: {c['chunk_text']}\n"
+        chunk_entry = f"\n--- CONTEXT CHUNK {idx} ---\nDocument: {c['document_name']} (Page {c['page_number']})\nContent: {c['chunk_text']}\n"
+        if len(context_str) + len(chunk_entry) > MAX_CONTEXT_CHARS:
+            break
+        context_str += chunk_entry
+        used_chunks.append(c)
+
+    if not used_chunks:
+        return "No information found in the provided documents.", []
 
     system_prompt = (
         "You are a strict document-grounded AI assistant. "
-        "Answer the user's question using ONLY the retrieved document context below. "
-        "Do NOT use outside knowledge, assume facts, or synthesize external references. "
-        "If the answer cannot be directly derived from the provided context, reply exactly: "
-        "'No information found in the provided documents.'"
+        "Answer the user's question using ONLY the provided document context below. "
+        "Do NOT use outside knowledge or assume facts. "
+        "If the context does not explicitly contain the answer to the user's question, "
+        "you MUST reply with EXACTLY: 'No information found in the provided documents.'"
     )
 
     user_prompt = f"USER QUESTION: {query}\n\nRETRIEVED CONTEXT:\n{context_str}"
 
     try:
         client = get_groq_client(api_key)
-        
-        # Dynamically fetch an active model from your Groq account
         selected_model = get_active_groq_model(client)
 
         response = client.chat.completions.create(
@@ -373,9 +381,17 @@ def generate_grounded_answer(query: str, retrieved_chunks: List[Dict], api_key: 
             ],
             temperature=0.0
         )
-        return response.choices[0].message.content
+        answer = response.choices[0].message.content.strip()
+
+        # If answer indicates no information found, suppress sources
+        if "No information found in the provided documents" in answer:
+            return "No information found in the provided documents.", []
+            
+        return answer, used_chunks
+
     except Exception as e:
-        return f"Error communicating with Groq API: {str(e)}"
+        # On API error, display message and clear sources
+        return f"Error communicating with Groq API: {str(e)}", []
 
 # ==============================================================================
 # 9. STREAMLIT UI
@@ -385,23 +401,19 @@ def main():
     st.caption("Persistent Vector Indexing & Automatic Hybrid Search")
 
     groq_api_key = st.secrets.get("GROQ_API_KEY", "").strip()
-
     index, metadata, indexed_docs = load_persistent_store()
 
     # --- SIDEBAR: CLEAN INPUT CONTROLS ---
     with st.sidebar:
         st.header("📄 Add Documents")
         
-        # Single upload box for PDF, TXT, or MD
         uploaded_files = st.file_uploader(
             "Upload Document (PDF, TXT, or MD)", 
             type=["pdf", "txt", "md"], 
             accept_multiple_files=True
         )
 
-        # Google Drive or Web PDF Link Input
         drive_url = st.text_input("Or enter Google Drive / PDF Link")
-
         process_btn = st.button("⚙️ Index / Process Documents", use_container_width=True)
 
         st.divider()
@@ -463,21 +475,16 @@ def main():
             return
 
         with st.spinner("Searching documents & generating grounded response..."):
-            # Automatic Hybrid Search
             retrieved_chunks = automatic_hybrid_search(query, index, metadata)
+            answer, valid_sources = generate_grounded_answer(query, retrieved_chunks, groq_api_key)
 
-            # Grounded Generation
-            answer = generate_grounded_answer(query, retrieved_chunks, groq_api_key)
-
-            # Display Answer
             st.markdown("### Answer")
             st.write(answer)
 
-            # Display File Name and Page Number Sources
             st.markdown("### Sources")
-            if retrieved_chunks and answer != "No information found in the provided documents.":
+            if valid_sources and answer != "No information found in the provided documents.":
                 seen_sources = set()
-                for c in retrieved_chunks:
+                for c in valid_sources:
                     page_info = f"Page {c['page_number']}" if c['page_number'] != "N/A" else "Page N/A"
                     source_str = f"📄 **{c['document_name']}** — {page_info}"
                     if source_str not in seen_sources:
