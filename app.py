@@ -53,6 +53,38 @@ def get_groq_client(api_key: str):
         base_url="https://api.groq.com/openai/v1"
     )
 
+def get_active_groq_model(client: OpenAI) -> str:
+    """
+    Dynamically fetches available models from your Groq API account
+    to avoid hardcoded model name deprecation or access errors.
+    """
+    # Preferred free & reliable Groq models ranked by preference
+    preferred_models = [
+        "llama-3.1-8b-instant",
+        "llama3-70b-8192",
+        "llama3-8b-8192",
+        "mixtral-8x7b-32768",
+        "gemma2-9b-it"
+    ]
+    
+    try:
+        models_response = client.models.list()
+        available_model_ids = [m.id for m in models_response.data] if hasattr(models_response, 'data') else [m.id for m in models_response]
+        
+        # 1. Match preferred models if present in user's available models
+        for model in preferred_models:
+            if model in available_model_ids:
+                return model
+                
+        # 2. Return first available model ID if none from preferred list matched
+        if available_model_ids:
+            return available_model_ids[0]
+    except Exception:
+        pass
+
+    # Safe fallback if dynamic listing fails
+    return "llama-3.1-8b-instant"
+
 # ==============================================================================
 # 3. EXTRACTION FUNCTIONS
 # ==============================================================================
@@ -329,9 +361,12 @@ def generate_grounded_answer(query: str, retrieved_chunks: List[Dict], api_key: 
 
     try:
         client = get_groq_client(api_key)
+        
+        # Dynamically fetch an active model from your Groq account
+        selected_model = get_active_groq_model(client)
 
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=selected_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
