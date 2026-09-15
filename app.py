@@ -46,37 +46,12 @@ def load_embedding_model():
     return SentenceTransformer(EMBEDDING_MODEL_NAME)
 
 @st.cache_resource(show_spinner=False)
-def get_grok_client(api_key: str):
-    """Initialize OpenAI-compatible client for xAI Grok API."""
+def get_groq_client(api_key: str):
+    """Initialize OpenAI-compatible client for Groq API."""
     return OpenAI(
         api_key=api_key,
-        base_url="https://api.x.ai/v1"
+        base_url="https://api.groq.com/openai/v1"
     )
-
-def get_active_grok_model(client: OpenAI) -> str:
-    """
-    Dynamically fetches available models from your xAI API account.
-    Falls back to current standard model names.
-    """
-    preferred_models = ["grok-4.6", "grok-4-latest", "grok-4", "grok-3", "grok-2-1212"]
-    
-    try:
-        models_response = client.models.list()
-        available_model_ids = [m.id for m in models_response.data] if hasattr(models_response, 'data') else [m.id for m in models_response]
-        
-        # 1. Match preferred models if present
-        for model in preferred_models:
-            if model in available_model_ids:
-                return model
-                
-        # 2. Return first available text model if preferred list doesn't match
-        if available_model_ids:
-            return available_model_ids[0]
-    except Exception:
-        pass
-
-    # Safe fallback if model list call fails
-    return "grok-4.6"
 
 # ==============================================================================
 # 3. EXTRACTION FUNCTIONS
@@ -329,10 +304,10 @@ def automatic_hybrid_search(query: str, index: faiss.Index, metadata: List[Dict]
     return [item[0] for item in final_ranked[:DEFAULT_TOP_K]]
 
 # ==============================================================================
-# 8. GROUNDED GENERATION VIA GROK API
+# 8. GROUNDED GENERATION VIA GROQ API
 # ==============================================================================
 def generate_grounded_answer(query: str, retrieved_chunks: List[Dict], api_key: str) -> str:
-    """Generates grounded answers strictly derived from retrieved context."""
+    """Generates grounded answers strictly derived from retrieved context using Groq API."""
     if not retrieved_chunks:
         return "No information found in the provided documents."
 
@@ -353,13 +328,10 @@ def generate_grounded_answer(query: str, retrieved_chunks: List[Dict], api_key: 
     user_prompt = f"USER QUESTION: {query}\n\nRETRIEVED CONTEXT:\n{context_str}"
 
     try:
-        client = get_grok_client(api_key)
-        
-        # Dynamically retrieve active model for your xAI account
-        selected_model = get_active_grok_model(client)
+        client = get_groq_client(api_key)
 
         response = client.chat.completions.create(
-            model=selected_model,
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -368,7 +340,7 @@ def generate_grounded_answer(query: str, retrieved_chunks: List[Dict], api_key: 
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"Error communicating with Grok API: {str(e)}"
+        return f"Error communicating with Groq API: {str(e)}"
 
 # ==============================================================================
 # 9. STREAMLIT UI
@@ -377,7 +349,7 @@ def main():
     st.title("📚 Advanced RAG AI Document Assistant")
     st.caption("Persistent Vector Indexing & Automatic Hybrid Search")
 
-    grok_api_key = st.secrets.get("GROK_API_KEY", "")
+    groq_api_key = st.secrets.get("GROQ_API_KEY", "").strip()
 
     index, metadata, indexed_docs = load_persistent_store()
 
@@ -451,8 +423,8 @@ def main():
             st.error("No indexed documents found. Please upload documents first.")
             return
 
-        if not grok_api_key:
-            st.error("GROK_API_KEY is missing from Streamlit secrets.")
+        if not groq_api_key:
+            st.error("GROQ_API_KEY is missing from Streamlit secrets.")
             return
 
         with st.spinner("Searching documents & generating grounded response..."):
@@ -460,7 +432,7 @@ def main():
             retrieved_chunks = automatic_hybrid_search(query, index, metadata)
 
             # Grounded Generation
-            answer = generate_grounded_answer(query, retrieved_chunks, grok_api_key)
+            answer = generate_grounded_answer(query, retrieved_chunks, groq_api_key)
 
             # Display Answer
             st.markdown("### Answer")
