@@ -21,11 +21,11 @@ METADATA_FILE = "metadata.pkl"
 DOC_HASH_FILE = "indexed_docs.pkl"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
-# Fixed default chunking parameters (hidden from UI)
+# Fixed default chunking parameters
 DEFAULT_CHUNK_SIZE = 500
 DEFAULT_CHUNK_OVERLAP = 100
 
-# Fixed default search parameters (hidden from UI)
+# Fixed default search parameters
 DEFAULT_TOP_K = 4
 DEFAULT_SEM_WEIGHT = 0.70
 DEFAULT_KEY_WEIGHT = 0.30
@@ -52,6 +52,26 @@ def get_grok_client(api_key: str):
         api_key=api_key,
         base_url="https://api.x.ai/v1"
     )
+
+def get_active_grok_model(client: OpenAI) -> str:
+    """
+    Dynamically retrieve active Grok model from the xAI API list endpoint
+    to prevent 'Model not found' 400 errors.
+    """
+    candidate_models = ["grok-4.6", "grok-2-latest", "grok-2", "grok-beta"]
+    try:
+        available_models = [m.id for m in client.models.list()]
+        for candidate in candidate_models:
+            if candidate in available_models:
+                return candidate
+        # If candidates are not explicitly listed, return the first available model ID
+        if available_models:
+            return available_models[0]
+    except Exception:
+        pass
+    
+    # Safe fallback if listing models endpoint is unavailable
+    return "grok-2-latest"
 
 # ==============================================================================
 # 3. EXTRACTION FUNCTIONS
@@ -88,7 +108,7 @@ def extract_uploaded_file(file) -> List[Dict[str, Any]]:
 def extract_pdf_from_url(url: str) -> List[Dict[str, Any]]:
     """Download and extract text page-by-page from a web PDF or Google Drive URL."""
     try:
-        # Convert standard Google Drive view/share links to direct download link
+        # Convert standard Google Drive view/share links to direct download links
         if "drive.google.com" in url:
             file_id_match = re.search(r'/d/([a-zA-Z0-9_-]+)', url) or re.search(r'id=([a-zA-Z0-9_-]+)', url)
             if file_id_match:
@@ -305,10 +325,10 @@ def automatic_hybrid_search(query: str, index: faiss.Index, metadata: List[Dict]
     return [item[0] for item in final_ranked[:DEFAULT_TOP_K]]
 
 # ==============================================================================
-# 8. GROUNDED GENERATION VIA UPDATED GROK MODEL
+# 8. GROUNDED GENERATION VIA GROK API
 # ==============================================================================
 def generate_grounded_answer(query: str, retrieved_chunks: List[Dict], api_key: str) -> str:
-    """Uses grok-2-1212 to generate answers strictly derived from chunks."""
+    """Generates grounded answers strictly derived from retrieved context."""
     if not retrieved_chunks:
         return "No information found in the provided documents."
 
@@ -330,8 +350,12 @@ def generate_grounded_answer(query: str, retrieved_chunks: List[Dict], api_key: 
 
     try:
         client = get_grok_client(api_key)
+        
+        # Dynamically resolve model to avoid 400 Bad Request model error
+        selected_model = get_active_grok_model(client)
+
         response = client.chat.completions.create(
-            model="grok-2-1212",  # Fixed API Error 400 (model updated from grok-beta)
+            model=selected_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -357,14 +381,14 @@ def main():
     with st.sidebar:
         st.header("📄 Add Documents")
         
-        # Single box for PDF, TXT, or MD
+        # Single upload box for PDF, TXT, or MD
         uploaded_files = st.file_uploader(
             "Upload Document (PDF, TXT, or MD)", 
             type=["pdf", "txt", "md"], 
             accept_multiple_files=True
         )
 
-        # Direct Google Drive or Web PDF Link Input
+        # Google Drive or Web PDF Link Input
         drive_url = st.text_input("Or enter Google Drive / PDF Link")
 
         process_btn = st.button("⚙️ Index / Process Documents", use_container_width=True)
