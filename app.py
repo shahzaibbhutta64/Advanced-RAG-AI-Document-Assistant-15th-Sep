@@ -32,7 +32,7 @@ DEFAULT_KEY_WEIGHT = 0.30
 DEFAULT_THRESHOLD = 0.10
 
 # Maximum characters allowed in prompt context to prevent Groq API max context errors
-MAX_CONTEXT_CHARS = 6000
+MAX_CONTEXT_CHARS = 4000
 
 st.set_page_config(
     page_title="Advanced RAG AI Document Assistant",
@@ -58,14 +58,13 @@ def get_groq_client(api_key: str):
 
 def get_active_groq_model(client: OpenAI) -> str:
     """
-    Dynamically fetches available models from your Groq API account
-    to avoid hardcoded model name deprecation or access errors.
+    Selects stable free-tier Groq models with high rate limits.
     """
     preferred_models = [
         "llama-3.1-8b-instant",
-        "llama3-70b-8192",
         "llama3-8b-8192",
         "mixtral-8x7b-32768",
+        "llama3-70b-8192",
         "gemma2-9b-it"
     ]
     
@@ -340,12 +339,11 @@ def automatic_hybrid_search(query: str, index: faiss.Index, metadata: List[Dict]
 def generate_grounded_answer(query: str, retrieved_chunks: List[Dict], api_key: str) -> Tuple[str, List[Dict]]:
     """
     Generates grounded answers strictly derived from retrieved context using Groq API.
-    Truncates prompt to safely avoid error 400 and clears sources if no info is found.
+    Includes max_tokens parameter to stay within Groq free-tier rate limits.
     """
     if not retrieved_chunks:
         return "No information found in the provided documents.", []
 
-    # Build context string safely without exceeding MAX_CONTEXT_CHARS
     context_str = ""
     used_chunks = []
 
@@ -379,18 +377,17 @@ def generate_grounded_answer(query: str, retrieved_chunks: List[Dict], api_key: 
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.0
+            temperature=0.0,
+            max_tokens=500  # Explicitly limit max output tokens to stay under Groq OTPM rate limit
         )
         answer = response.choices[0].message.content.strip()
 
-        # If answer indicates no information found, suppress sources
         if "No information found in the provided documents" in answer:
             return "No information found in the provided documents.", []
             
         return answer, used_chunks
 
     except Exception as e:
-        # On API error, display message and clear sources
         return f"Error communicating with Groq API: {str(e)}", []
 
 # ==============================================================================
